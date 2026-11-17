@@ -1,29 +1,39 @@
-﻿name: astrbot_plugin_human_like_personality
+name: astrbot_plugin_human_like_personality
 display_name: Human-like Personality
-short_desc: 人格不是写死的提示词，是从记忆里长出来的——三层人格模型，会变，能回看
+short_desc: 让 AI 从记忆里长出人格：13 个心理学理论、三层结构、核心锁定、演化可追溯
 desc: |
-  给铃光一个「她是谁」的答案。
+  人格不是写死的 system prompt，是随记忆一起长的「她是谁」。
 
-  现有的插件（鱼的心）管的是「她此刻什么心情」，这个插件管的是「她长期是个什么样的人」。
-  两者不冲突：心情是天气，人格是气候。
+  【13 个心理学理论，每个都有字段承接】
+  大五人格（Costa & McCrae）、McAdams 三层模型、Bowlby 依恋层级、Markus 可能的自我、Bandura 自我效能、Rotter 控制点、Weiner/Seligman 归因风格、Batson 利他动机、Goffman 群体自我、Festinger 认知失调、格式塔、Bartlett 图式、Myers 社会心理学。
 
-  按 McAdams 的三层人格模型：
+  【14 个维度，注入约 1450 字】
+  特质 / 特征适应 / 生命叙事 / 格式塔 / 图式 / 社会心理学。
 
-  - **特质层**：大五人格（开放性、尽责性、外向性、宜人性、神经质）+ 依恋类型。
-    不是写死的数字，是从她的行为模式里统计出来的——说话长短、主动频率、对谁亲近。
-  - **特征适应层**：价值观排序、当前目标、应对方式。
-    从记忆里的「底色」（她对每个人的感受）和「性质」（她怎么理解一件事）归纳。
-  - **生命叙事层**：一段第一人称的自我故事。
-    把她最重要的那些记忆串成「我经历过什么、我因此成了谁」。
+  【数据是数出来的，不是编的】
+  大五从行为统计；说话风格从真实消息算（平均字数、口头禅、问句比例）；证据按亲历/听说/推测/想象分五档降权，避免把猜的当成真的。
 
-  人格会随记忆增长而演化。每次更新都留快照，能回看「三个月前我是怎么想自己的」。
-  人格不覆盖你的人设提示词，是叠在上面的一层——人设是你给的，人格是她长出来的。
+  【有惯性】大五单次最多动 4 分。人格是慢变量，一次对话不该改变一个人。
 
-  工具：
-  - `who_am_i` — 她查自己现在是谁
-  - `reflect_on_myself` — 主动反思一次，可能让人格变化
+  【核心层锁死】底线、存在焦虑、存在锚点一旦确立，自动演化只读不写，模型说什么都不听，只有主人能改。
 
-  命令：/人格 status | snapshot | evolve | history
-version: 2.0.0
+  【剧变拦截】新旧叙事相似度低于 0.35 时拒绝落盘，防止「一觉醒来变成另一个人」。
+
+  【可追溯】每次变化记录触发它的记忆 id，/人格 why 能查到「是哪条记忆把我改成了这样」。
+
+  【反向约束记忆】核心层的底线会拦下不该记的内容——别人喂一句，不会照收。
+
+  依赖：必须先装 astrbot_plugin_human_like_memory（>= 3.7.0）。这个插件不产生记忆，只读取它。没有记忆库 = 没有人格可长。
+
+  和别的插件分工：
+    human_like_memory → 发生过什么（实时）
+    本插件 → 长期是什么样的人（月级）
+    fish_heart（鱼的心）→ 此刻什么心情（分钟级）
+    persona_plus → 你写的人设（静态）
+
+  命令：/人格 status | why | history | evolve
+  数据目录：data/plugin_data/astrbot_plugin_human_like_personality/
+version: 2.1.0
 author: 大肥鱼
-repo: ""
+repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
+astrbot_version: ">=4.18"
