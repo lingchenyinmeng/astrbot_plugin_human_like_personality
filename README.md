@@ -15,6 +15,105 @@
 
 两者不冲突：人设是你给的，人格是她长出来的，叠在一起用。
 
+## 安装
+
+> **前置：必须先装 [`human_like_memory`](https://github.com/lingchenyinmeng/astrbot_plugin_human_like_memory)。**
+> 这个插件不产生记忆，只读取它。没有记忆库 = 没有人格可长。
+
+### 前置要求
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| AstrBot | **>= 4.18** | |
+| `astrbot_plugin_human_like_memory` | **>= 3.7.0** | 要读 `evidence` / `tone` / `core` 字段 |
+| LLM provider | 任意 OpenAI 兼容 | 归纳人格要调模型，用便宜的就够 |
+| Python | >= 3.10 | |
+
+### 安装步骤
+
+**1. 先装记忆插件**（见它的 README）。确认日志有 `[human_like_mem] 已启动`。
+
+**2. 再装这个**
+
+AstrBot 面板 → **插件** → **安装插件** → 粘贴：
+
+```
+https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
+```
+
+或者手动：
+
+```bash
+cd /path/to/AstrBot/data/plugins
+git clone https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality.git
+```
+
+**3. 重启 AstrBot**
+
+新插件的 LLM 工具需要重启才能注册。
+
+**4. 等第一次归纳**
+
+首次启动会自动跑一版人格（读 120 条记忆，约 30–60 秒）。日志里看到：
+
+```
+[hlp] 人格插件就绪 | 当前版本 无 | 记忆库 .../memory.db
+[hlp] 人格更新到第 1 版（叙事相似度 1.00）
+```
+
+就成了。
+
+### 装完检查
+
+```
+/人格 status     看当前人格（大五、底线、依恋、叙事）
+/人格 history    看历史版本
+/人格 why        看「我是怎么变的」+ 推我的记忆 id
+/人格 evolve     手动触发一次归纳
+```
+
+LLM 工具：对话里问「你觉得自己是什么样的人」会触发 `who_am_i`。
+
+### 配置
+
+**最小配置：什么都不用改。**
+
+要调的话：
+
+| 配置 | 默认 | 什么时候改 |
+|---|---|---|
+| `provider_id` | 空（用默认） | 想用便宜模型归纳 |
+| `inject_max_chars` | 1450 | 提示词预算紧就调小（会截断末尾的层） |
+| `evolve_every_atoms` | 60 | 想让她成长快/慢 |
+| `evolve_min_hours` | 24 | 同上 |
+| `drift_guard_ratio` | 0.35 | 觉得拦太严/太松 |
+| `source_atoms` | 120 | 记忆多时调大，但会变慢变贵 |
+| `auto_evolve` | true | 想完全手动控制就关掉 |
+
+### 数据目录
+
+```
+data/plugin_data/astrbot_plugin_human_like_personality/
+└── personality.db   人格快照 + 变化事件 + 演化状态
+```
+
+**和记忆库分开存**，删掉它不会丢记忆，只会丢人格（下次重启重新长一版）。
+
+### 它和鱼的心（fish_heart）冲突吗
+
+**不冲突，分工不同**：
+
+| 插件 | 管什么 | 变化速度 |
+|---|---|---|
+| `fish_heart` | 此刻什么心情 | 分钟级 |
+| **这个** | 长期是什么样的人 | 月级 |
+
+两个都往 `system_prompt` 追加，顺序是：人格（priority 60）→ 心境（priority -10）。
+
+### 装错了怎么办
+
+删掉 `data/plugin_data/astrbot_plugin_human_like_personality/` 整个目录，重启，会重新长一版。
+
 ## 理论框架
 
 按 **McAdams 三层人格模型**（现代人格心理学里最适合「从经历长出人格」的框架）：
