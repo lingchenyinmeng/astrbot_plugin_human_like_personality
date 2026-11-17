@@ -1,7 +1,9 @@
-name: astrbot_plugin_human_like_personality
+﻿name: astrbot_plugin_human_like_personality
 display_name: Human-like Personality
 short_desc: 让 AI 从记忆里长出人格：13 个心理学理论、三层结构、核心锁定、演化可追溯
 desc: |
+  让 AI 从记忆里长出人格：13 个理论 / 14 个维度 / 核心锁定 / 演化可追溯。
+
   人格不是写死的 system prompt，是随记忆一起长的「她是谁」。
 
   【13 个心理学理论，每个都有字段承接】
@@ -33,7 +35,7 @@ desc: |
 
   命令：/人格 status | why | history | evolve
   数据目录：data/plugin_data/astrbot_plugin_human_like_personality/
-version: 2.1.0
+version: 2.1.1
 author: 大肥鱼
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"
