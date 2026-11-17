@@ -35,7 +35,7 @@ desc: |
 
   命令：/人格 status | why | history | evolve
   数据目录：data/plugin_data/astrbot_plugin_human_like_personality/
-version: 2.1.1
+version: 2.2.0
 author: 大肥鱼
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"

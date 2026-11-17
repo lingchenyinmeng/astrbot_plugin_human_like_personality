@@ -62,30 +62,63 @@ class HumanLikePersonality(Star):
             asyncio.create_task(self._safe_evolve("首次生成"))
 
     def _plugin_data_dir(self) -> str:
+        """自己的插件数据目录。
+
+        **优先从插件代码位置推**，不用 cwd——插件在 `data/plugins/<name>/main.py`，
+        往上 4 层就是 AstrBot 根，再拼 `data/plugin_data/<name>`。
+        cwd 会变（测试、别的进程调起来都不一样），代码位置不会。
+        """
         try:
-            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            data = os.path.join(base, "data", "plugin_data", PLUGIN_NAME)
-            if os.path.isdir(os.path.join(base, "data", "plugin_data")):
-                return data
+            here = os.path.dirname(os.path.abspath(__file__))   # data/plugins/<name>
+            root = os.path.dirname(os.path.dirname(here))       # data
+            root = os.path.dirname(root)                        # AstrBot 根
+            candidate = os.path.join(root, "data", "plugin_data", PLUGIN_NAME)
+            if os.path.isdir(os.path.join(root, "data", "plugin_data")):
+                return candidate
         except Exception:
             pass
-        # 兜底：AstrBot 默认位置
-        return os.path.join(
-            "A:\\dafeiyu\\astrbot\\data\\plugin_data", PLUGIN_NAME
-        )
+        # 其次问 AstrBot
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            base = get_astrbot_data_path()
+            if base:
+                return os.path.join(base, "plugin_data", PLUGIN_NAME)
+        except Exception:
+            pass
+        try:
+            from astrbot.core.star.star_tools import StarTools
+
+            return str(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception:
+            return os.path.join(os.getcwd(), "data", "plugin_data", PLUGIN_NAME)
 
     def _find_memory_db(self) -> str | None:
         explicit = str(self.conf.get("memory_db_path") or "").strip()
         if explicit and os.path.isfile(explicit):
             return explicit
-        # 按插件数据目录的兄弟目录找
+        # 1. 和我自己的 data 目录同级
         try:
-            base = os.path.join("A:\\dafeiyu\\astrbot\\data\\plugin_data", MEMORY_PLUGIN)
-            p = os.path.join(base, "memory.db")
+            base = os.path.dirname(self._plugin_data_dir())
+            p = os.path.join(base, MEMORY_PLUGIN, "memory.db")
             if os.path.isfile(p):
                 return p
         except Exception:
             pass
+
+        # 2. 从插件代码目录往上推（某些部署 data 不在插件同级）
+        try:
+            here = os.path.abspath(__file__)
+            for _ in range(6):
+                here = os.path.dirname(here)
+                p = os.path.join(
+                    here, "data", "plugin_data", MEMORY_PLUGIN, "memory.db"
+                )
+                if os.path.isfile(p):
+                    return p
+        except Exception:
+            pass
+
         return None
 
     # ---------- 注入 ----------
@@ -296,7 +329,12 @@ class HumanLikePersonality(Star):
         为什么不用记忆库：记忆里 me_to_* 的原子是**叙述**（"噩壤问我…"），
         不是原话。拿它统计算出来的口头禅会是"噩壤让我"，完全不是她。
         """
-        bot_qq = str(self.conf.get("bot_qq") or "1226735574").strip()
+        bot_qq = str(self.conf.get("bot_qq") or "").strip()
+        if not bot_qq:
+            # 没配就跳过说话风格统计——这一项只影响 voice 那几个字段，
+            # 其他维度照常归纳，不能因为少个 QQ 号就整体不工作
+            logger.info("[hlp] 没配 bot_qq，跳过说话风格统计")
+            return []
         hist_db = self._find_history_db()
         if not hist_db:
             return []
@@ -327,10 +365,23 @@ class HumanLikePersonality(Star):
 
     def _find_history_db(self) -> str | None:
         """AstrBot 主库（有 platform_message_history）。"""
-        for p in (
-            r"A:\dafeiyu\astrbot\data\data_v4.db",
-            os.path.join(os.getcwd(), "data", "data_v4.db"),
-        ):
+        cands = []
+        # data_v4.db 在 AstrBot 的 data/ 下，和自己的 plugin_data 同级
+        try:
+            cands.append(
+                os.path.join(os.path.dirname(self._plugin_data_dir()), "data_v4.db")
+            )
+        except Exception:
+            pass
+        try:
+            here = os.path.abspath(__file__)
+            for _ in range(6):
+                here = os.path.dirname(here)
+                cands.append(os.path.join(here, "data", "data_v4.db"))
+        except Exception:
+            pass
+        cands.append(os.path.join(os.getcwd(), "data", "data_v4.db"))
+        for p in cands:
             if os.path.isfile(p):
                 return p
         return None
@@ -340,8 +391,13 @@ class HumanLikePersonality(Star):
         explicit = str(self.conf.get("people_db_path") or "").strip()
         if explicit and os.path.isfile(explicit):
             return explicit
-        p = r"A:\dafeiyu\astrbot\data\plugin_data\astrbot_plugin_human_like_memory\people.db"
-        return p if os.path.isfile(p) else None
+        # 和 memory.db 同目录
+        mdb = self._find_memory_db()
+        if mdb:
+            p = os.path.join(os.path.dirname(mdb), "people.db")
+            if os.path.isfile(p):
+                return p
+        return None
 
     async def _load_people(self, limit: int = 40) -> list[dict]:
         """读人库：「我」对每个人是什么底色——依恋层级要按人判，得有这个。"""
