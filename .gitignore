@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# 数据与隐私：绝不入库
+*.db
+*.db-shm
+*.db-wal
+slang.json
+corrections.jsonl
+thoughts.jsonl
+data/
+plugin_data/
+
+# 日志与临时
+*.log
+.run/
+*.tmp
+
+# 系统
+.DS_Store
+Thumbs.db

@@ -1,0 +1,80 @@
+{
+  "enabled": {
+    "description": "启用人格注入",
+    "hint": "关掉后不再往系统提示词里加「你是谁」这一段，但人格数据仍然保留",
+    "type": "bool",
+    "default": true
+  },
+  "memory_db_path": {
+    "description": "human-like memory 的记忆库路径",
+    "hint": "留空会自动找 data/plugin_data/astrbot_plugin_human_like_memory/memory.db",
+    "type": "string",
+    "default": ""
+  },
+  "people_db_path": {
+    "description": "human-like memory 的人库路径",
+    "hint": "留空会自动找同目录下的 people.db",
+    "type": "string",
+    "default": ""
+  },
+  "evolve_every_atoms": {
+    "description": "每多多少条记忆重新归纳一次人格",
+    "hint": "太小会频繁变、太大会让她长期不成长。默认 60 条。",
+    "type": "int",
+    "default": 60
+  },
+  "evolve_min_hours": {
+    "description": "两次人格更新至少隔多少小时",
+    "hint": "防止记忆灌进来时一天变好几次。默认 24 小时。",
+    "type": "int",
+    "default": 24
+  },
+  "source_atoms": {
+    "description": "归纳人格时读多少条最重要的记忆",
+    "hint": "读太多会慢且贵，读太少人格不稳。默认 120 条。",
+    "type": "int",
+    "default": 120
+  },
+  "inject_max_chars": {
+    "description": "人格段注入的最大字数",
+    "hint": "太长会挤掉别的提示词。默认 1450 字（14 层全塞下实测 1421）。",
+    "type": "int",
+    "default": 1450
+  },
+  "inject_priority": {
+    "description": "注入优先级",
+    "hint": "数字小的先执行。默认 60（在记忆注入之后、鱼的心之前）。",
+    "type": "int",
+    "default": 60
+  },
+  "provider_id": {
+    "description": "归纳人格用哪个模型",
+    "hint": "留空用当前默认模型。建议用便宜一点的。",
+    "type": "string",
+    "default": ""
+  },
+  "auto_evolve": {
+    "description": "自动演化",
+    "hint": "开着的话，新记忆攒够就自动重新归纳人格。关掉只能手动 /人格 evolve。",
+    "type": "bool",
+    "default": true
+  },
+  "bot_qq": {
+    "description": "她自己（铃光）的 QQ 号",
+    "hint": "统计说话风格时要从消息历史里挑出她说的那些话。填错的话口头禅会算成人家的。",
+    "type": "string",
+    "default": "1226735574"
+  },
+  "evolve_min_new_atoms": {
+    "description": "新增多少条记忆才值得重新归纳",
+    "hint": "太少会每次都重算、人格会飘。默认 10 条。",
+    "type": "int",
+    "default": 10
+  },
+  "drift_guard_ratio": {
+    "description": "叙事剧变拦截阈值（0-1）",
+    "hint": "新旧叙事相似度低于这个值就拒绝落盘，保持旧版。默认 0.35。调低=更宽松。",
+    "type": "float",
+    "default": 0.35
+  }
+}
