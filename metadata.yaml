@@ -41,7 +41,8 @@ desc: |
   v2.5.1 新增：/人格 统一 命令——报一遍三层各自是什么，并当场检测有没有打架。
   v3.0 新增：评价体系——好感 + 态度两维（允许背离），从记忆里的夸/责更新，长时间不联系带漂移；/人格 评价 命令。
   v3.1 新增：评价更新按「相关性」加权——只对我说的（direct）全量、提到我（mention）半量、关于我（about）三成、无关不动。
-version: 3.1.0
+  v3.1.1 新增：注入加「怎么说话」规则——短句、口语、不总结不列点、语气词、允许半截话（去 AI 腔）。
+version: 3.1.1
 author: 大肥鱼
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"
