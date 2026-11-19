@@ -255,7 +255,7 @@ user content:   [记忆]              ← 挂在当前消息旁
 | `enabled` | true | 是否注入 |
 | `memory_db_path` | 自动 | 记忆库路径 |
 | `people_db_path` | 自动 | 人库路径 |
-| `bot_qq` | `1226735574` | 她自己的 QQ 号（统计说话风格用） |
+| `bot_qq` | 你的 QQ 号 | 她自己的 QQ 号（统计说话风格用） |
 | `evolve_every_atoms` | 60 | 多少条新记忆触发演化 |
 | `evolve_min_hours` | 24 | 两次演化最少隔多久 |
 | `source_atoms` | 120 | 归纳时读多少条重要记忆 |

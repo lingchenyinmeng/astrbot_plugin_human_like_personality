@@ -13,6 +13,7 @@ from typing import Any
 import aiosqlite
 
 from .model import Personality
+from .rating import apply_interaction as _apply_interaction, drift_step, drift_target
 
 logger = None  # 由 main 注入，避免循环依赖
 try:
@@ -59,6 +60,19 @@ CREATE TABLE IF NOT EXISTS personality_state (
     key   TEXT PRIMARY KEY,
     value TEXT DEFAULT ''
 );
+
+-- 评价体系：好感 + 态度 两维（0-100，默认 50），带漂移锚
+CREATE TABLE IF NOT EXISTS person_ratings (
+    person_key       TEXT PRIMARY KEY,
+    name             TEXT DEFAULT '',
+    affection        REAL DEFAULT 50,
+    attitude         REAL DEFAULT 50,
+    note             TEXT DEFAULT '',
+    updated_at       REAL DEFAULT 0,
+    affection_anchor REAL DEFAULT 50,
+    attitude_anchor  REAL DEFAULT 50,
+    last_drift_at    REAL DEFAULT 0
+);
 """
 
 
@@ -91,6 +105,13 @@ class PersonalityStore:
             if "trigger_atom_ids" not in ev_cols:
                 await db.execute(
                     "ALTER TABLE personality_events ADD COLUMN trigger_atom_ids TEXT DEFAULT '[]'"
+                )
+            # person_ratings 补 name 列（3.0.0 第一版没有）
+            cur = await db.execute("PRAGMA table_info(person_ratings)")
+            pr_cols = {row[1] for row in await cur.fetchall()}
+            if pr_cols and "name" not in pr_cols:
+                await db.execute(
+                    "ALTER TABLE person_ratings ADD COLUMN name TEXT DEFAULT ''"
                 )
             await db.commit()
 
@@ -273,6 +294,35 @@ class PersonalityStore:
             )
             return [dict(r) for r in await cur.fetchall()]
 
+    async def record_coherence(self, version: int, issues: list[dict]) -> int:
+        """把「统一」校验的修正记进 events，维度用 coherence.*，可追溯。"""
+        if not issues:
+            return 0
+        now = time.time()
+        rows = [
+            (
+                int(version),
+                f"coherence.{str(i.get('dim') or '?')}",
+                str(i.get("old") or "")[:300],
+                str(i.get("new") or "")[:300],
+                str(i.get("note") or "")[:200],
+                "[]",
+                now,
+            )
+            for i in issues
+            if isinstance(i, dict)
+        ]
+        if not rows:
+            return 0
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                "INSERT INTO personality_events(version, dimension, old_value, "
+                "new_value, reason, trigger_atom_ids, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            await db.commit()
+        return len(rows)
+
     # ---------- 演化状态 ----------
 
     async def get_state(self, key: str, default: str = "") -> str:
@@ -302,6 +352,98 @@ class PersonalityStore:
                 "snapshots": await one("SELECT COUNT(*) FROM personality_snapshots"),
                 "events": await one("SELECT COUNT(*) FROM personality_events"),
             }
+
+    # ---------- 评价体系（好感 + 态度） ----------
+
+    async def get_rating(self, person_key: str) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM person_ratings WHERE person_key = ?", (str(person_key),)
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def find_rating(self, who: str) -> dict | None:
+        """按名字或 key（QQ）找评价。"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM person_ratings WHERE person_key = ? OR name = ? "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (str(who), str(who)),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def all_ratings(self) -> list[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM person_ratings ORDER BY affection DESC")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def apply_interaction(self, person_key: str, kind: str, name: str = "", weight: float = 1.0) -> dict | None:
+        """把一次夸/责落到某人的两维评价上。返回 {person_key, name, affection, attitude, attribution}。"""
+        key = str(person_key or "").strip()
+        if not key:
+            return None
+        cur = await self.get_rating(key)
+        a = float(cur["affection"]) if cur else 50.0
+        t = float(cur["attitude"]) if cur else 50.0
+        new_a, new_t, attr = _apply_interaction(a, t, str(kind), weight=weight)
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO person_ratings(person_key, name, affection, attitude, updated_at, "
+                "affection_anchor, attitude_anchor) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(person_key) DO UPDATE SET "
+                "name = CASE WHEN excluded.name != '' THEN excluded.name ELSE person_ratings.name END, "
+                "affection = excluded.affection, attitude = excluded.attitude, "
+                "updated_at = excluded.updated_at, "
+                "affection_anchor = excluded.affection_anchor, "
+                "attitude_anchor = excluded.attitude_anchor",
+                (key, str(name or "").strip()[:30], new_a, new_t, now, new_a, new_t),
+            )
+            await db.commit()
+        return {"person_key": key, "name": str(name or "").strip()[:30], "affection": new_a, "attitude": new_t, "attribution": attr}
+
+    async def drift_ratings(self, drift_days: float = 30.0) -> int:
+        """长时间不联系 → 两维各自向中回归（高向下、低向上，各一步）。返回漂了几个人。"""
+        now = time.time()
+        gap = max(1.0, float(drift_days)) * 86400
+        drifted = 0
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM person_ratings")
+            rows = await cur.fetchall()
+            for r in rows:
+                if now - float(r["updated_at"] or 0) < gap:
+                    continue
+                if now - float(r["last_drift_at"] or 0) < gap:
+                    continue
+                a = float(r["affection"] or 50)
+                t = float(r["attitude"] or 50)
+                at = float(r["affection_anchor"] or 50)
+                tt = float(r["attitude_anchor"] or 50)
+                na = drift_step(a, drift_target(at))
+                nt = drift_step(t, drift_target(tt))
+                if na != a or nt != t:
+                    await db.execute(
+                        "UPDATE person_ratings SET affection = ?, attitude = ?, last_drift_at = ? "
+                        "WHERE person_key = ?",
+                        (na, nt, now, str(r["person_key"])),
+                    )
+                    drifted += 1
+            await db.commit()
+        return drifted
+
+    async def set_note(self, person_key: str, note: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE person_ratings SET note = ? WHERE person_key = ?",
+                (str(note or "")[:120], str(person_key)),
+            )
+            await db.commit()
 
     # ---------- 行 → 对象 ----------
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -23,6 +24,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .core.analyzer import analyze_voice, behavior_signals
+from .core.coherence import apply_fixes, build_review_prompt, check_coherence, parse_review
 from .core.injector import build_block, build_self_report
 from .core.model import Personality, Voice
 from .core.store import PersonalityStore
@@ -60,6 +62,12 @@ class HumanLikePersonality(Star):
         # 首次启动如果没人格，后台先归纳一版
         if self.current is None and self.memory_db:
             asyncio.create_task(self._safe_evolve("首次生成"))
+        # 后台循环（演化 + 评价更新 + 漂移）放 initialize 里起：
+        # on_astrbot_loaded 只在整机启动时触发，插件 reload 不会重发，
+        # 放这里保证 reload 后循环照样跑。
+        self._loop_started = True
+        asyncio.create_task(self._evolve_loop())
+        logger.info("[hlp] 后台循环已启动（演化 + 评价 + 漂移）")
 
     def _plugin_data_dir(self) -> str:
         """自己的插件数据目录。
@@ -156,7 +164,11 @@ class HumanLikePersonality(Star):
         await asyncio.sleep(60)  # 启动后等一分钟，别和别的插件抢
         while True:
             try:
+                if self.memory_db is None:
+                    self.memory_db = self._find_memory_db()
                 await self._maybe_auto_evolve()
+                await self._update_ratings()
+                await self._drift_ratings()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -227,6 +239,24 @@ class HumanLikePersonality(Star):
             logger.warning("[hlp] 模型没给出有效人格，保留旧版")
             return None
 
+        # ---------- 统一：跨层一致性校验 ----------
+        # 叙事是主锚，其余层不能打架。先做零成本的规则校验，再（可选）让模型自查一遍。
+        coherence_issues: list[dict] = []
+        try:
+            coherence_issues += check_coherence(p)
+        except Exception as e:
+            logger.debug(f"[hlp] 规则一致性校验失败: {e!r}")
+        if bool(self.conf.get("coherence_llm_check", True)):
+            try:
+                review = await provider.text_chat(
+                    prompt=build_review_prompt(p), contexts=[]
+                )
+                raw = str(getattr(review, "completion_text", "") or "")
+                fixes = parse_review(raw)
+                coherence_issues += apply_fixes(p, fixes)
+            except Exception as e:
+                logger.debug(f"[hlp] LLM 一致性自查失败: {e!r}")
+
         # ---------- 演化前自检：叙事剧变要拦下来 ----------
         # 铃光：「人格这东西，权重一变、逻辑一改，我就成了另一个人」。
         # 自动演化出错（模型把叙事写成完全另一个人）时，没有人工审批，
@@ -250,12 +280,25 @@ class HumanLikePersonality(Star):
             changed_by="llm",
             trigger_atom_ids=trigger_ids,
         )
+        # 把「统一」校验的修正记进 events，/人格 why 能查到
+        if coherence_issues:
+            try:
+                n = await self.store.record_coherence(version, coherence_issues)
+                if n:
+                    logger.info(f"[hlp] 统一校验修正 {n} 处（第 {version} 版）")
+            except Exception as e:
+                logger.debug(f"[hlp] 记录一致性修正失败: {e!r}")
         self.current = await self.store.latest()
         await self.store.set_state("last_total_atoms", str(total))
         await self.store.set_state("last_evolve_at", str(time.time()))
         logger.info(
             f"[hlp] 人格更新到第 {version} 版（叙事相似度 {drift:.2f}）"
         )
+        # 人格外显：把「现在的她是谁」同步到 QQ 签名（默认关，见 sync_signature_on_evolve）
+        try:
+            await self._apply_outer_sync(self.current)
+        except Exception as e:
+            logger.debug(f"[hlp] 人格外显同步失败: {e!r}")
         return version
 
     @staticmethod
@@ -290,6 +333,120 @@ class HumanLikePersonality(Star):
         if total - prev_total < every:
             return
         await self._safe_evolve(f"新增 {total - prev_total} 条记忆")
+
+    # ---------- 人格外显（QQ 签名同步） ----------
+
+    def _qq_bot(self):
+        """找 OneBot（aiocqhttp/napcat）适配器的 bot，拿到 call_action。找不到返回 None。"""
+        try:
+            insts = getattr(self.context.platform_manager, "platform_insts", []) or []
+            for inst in insts:
+                bot = getattr(inst, "bot", None)
+                if bot is not None and hasattr(bot, "call_action"):
+                    return bot
+        except Exception:
+            pass
+        return None
+
+    def _signature_for(self, p) -> str:
+        """把人格压成一句能放 QQ 签名的话。"""
+        if p is None:
+            return ""
+        head = str(p.narrative or "").strip().splitlines()
+        line = " ".join((head[0] if head else "").split())
+        if line:
+            return line[:60]
+        style = str(getattr(getattr(p, "voice", None), "sentence_style", "") or "")
+        return " ".join(style.split())[:60]
+
+    async def _apply_outer_sync(self, p) -> None:
+        """人格演化后，把「现在的她是谁」同步到 QQ 个性签名。
+
+        默认关：这层和 persona_plus（改昵称/头像）不是一个东西，别默认抢签名。
+        """
+        if not bool(self.conf.get("sync_signature_on_evolve", False)):
+            return
+        bot = self._qq_bot()
+        if bot is None:
+            return
+        sig = self._signature_for(p)
+        if not sig:
+            return
+        try:
+            await bot.call_action("set_qq_profile", {"personal_note": sig})
+            logger.info(f"[hlp] 已按第 {getattr(p, 'version', '?')} 版人格同步 QQ 签名：{sig[:40]}")
+        except Exception as e:
+            logger.debug(f"[hlp] 同步 QQ 签名失败: {e!r}")
+
+    # ---------- 评价体系（好感 + 态度） ----------
+
+    async def _update_ratings(self) -> None:
+        """扫 hlm 最近的 praise/scold 原子，更新两维评价。增量：按 atom id 只扫新的。"""
+        if self.store is None or not self.memory_db:
+            return
+        if not bool(self.conf.get("rating_enabled", True)):
+            return
+        try:
+            last = int(await self.store.get_state("last_rating_scan_id", "0") or 0)
+            uri = f"file:{self.memory_db.replace(os.sep, '/')}?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT id, nature, who_id, who_name, metadata FROM atoms "
+                    "WHERE id > ? AND nature IN ('praise','scold') ORDER BY id ASC LIMIT 500",
+                    (last,),
+                )
+                rows = await cur.fetchall()
+            if not rows:
+                return
+            max_id = last
+            for r in rows:
+                who_id = str(r["who_id"] or "").strip()
+                who_name = str(r["who_name"] or "").strip()
+                # 优先 QQ 号（干净稳定），否则用干净的名字；脏名字（内容片段）直接跳过
+                if who_id and who_id.isdigit() and len(who_id) >= 5:
+                    key, name = who_id, who_name
+                elif who_name and 1 <= len(who_name) <= 8 and not re.search(r"[「」『』\"'（）()，。？、！\s]", who_name):
+                    key, name = who_name, who_name
+                else:
+                    key = ""
+                if not key:
+                    max_id = max(max_id, int(r["id"]))
+                    continue
+                # 相关性权重：direct 全量，mention 半量，about 三成，unrelated/未知不动
+                rel = ""
+                try:
+                    md = json.loads(r["metadata"] or "{}")
+                    if isinstance(md, dict):
+                        rel = str(md.get("relevance") or "")
+                except Exception:
+                    rel = ""
+                w = {"direct": 1.0, "mention": 0.5, "about": 0.3}.get(rel, 0.0)
+                if w <= 0:
+                    max_id = max(max_id, int(r["id"]))
+                    continue
+                kind = "praise" if str(r["nature"]) == "praise" else "scold"
+                try:
+                    await self.store.apply_interaction(key, kind, name=name, weight=w)
+                except Exception as e:
+                    logger.debug(f"[hlp] 更新「{name or key}」评价失败: {e!r}")
+                max_id = max(max_id, int(r["id"]))
+            await self.store.set_state("last_rating_scan_id", str(max_id))
+        except Exception as e:
+            logger.debug(f"[hlp] 更新评价失败: {e!r}")
+
+    async def _drift_ratings(self) -> None:
+        if self.store is None:
+            return
+        if not bool(self.conf.get("rating_enabled", True)):
+            return
+        try:
+            days = float(self.conf.get("rating_drift_days", 30) or 30)
+            n = await self.store.drift_ratings(days)
+            if n:
+                logger.info(f"[hlp] 评价漂移 {n} 人（长时间没联系）")
+        except Exception as e:
+            logger.debug(f"[hlp] 评价漂移失败: {e!r}")
 
     # ---------- 读记忆（只读，不写） ----------
 
@@ -618,6 +775,125 @@ class HumanLikePersonality(Star):
             lines.append(
                 f"  v{r['version']} · {ts} · {r['total_atoms']} 条记忆 · {r['reason'] or '—'}"
             )
+        yield event.plain_result("\n".join(lines))
+
+
+    @filter.command("统一", alias={"unify", "unified"})
+    async def cmd_unify(self, event: AstrMessageEvent):
+        '''报一遍三层（设定/成长/心情）各自现在是什么、有没有打架的地方。'''
+        p = self.current or (await self.store.latest() if self.store else None)
+
+        static = await self._read_static_persona(event)
+        set_block = static[:500] if static else "（没读到静态人设）"
+        grow_block = self._growth_summary(p)
+        mood_block = self._mood_status()
+
+        head = (
+            "【设定层（人设里写的，你是谁）】\n" + set_block + "\n\n"
+            "【成长层（从记忆里长出来的）】\n" + grow_block + "\n\n"
+            "【心情层】\n" + mood_block
+        )
+        yield event.plain_result(head)
+        yield event.plain_result("让我看看这几层有没有打架…")
+        verdict = await self._detect_conflicts(static, grow_block)
+        yield event.plain_result("【打架检测】\n" + verdict)
+
+    # ---------- 统一命令的辅助 ----------
+
+    async def _read_static_persona(self, event: AstrMessageEvent) -> str:
+        """读静态人设（AstrBot 的 persona 层）。"""
+        try:
+            pm = getattr(self.context, "persona_manager", None)
+            if pm is None:
+                return ""
+            persona = await pm.get_default_persona_v3(str(event.unified_msg_origin or ""))
+            if isinstance(persona, dict):
+                return str(persona.get("prompt") or "")
+            return str(getattr(persona, "prompt", "") or "")
+        except Exception as e:
+            logger.debug(f"[hlp] 读静态人设失败: {e!r}")
+            return ""
+
+    def _mood_status(self) -> str:
+        """心情层状态。fish_heart 关着就不去读它内部状态。"""
+        try:
+            meta = self.context.get_registered_star("astrbot_plugin_fish_heart")
+            on = bool(meta and getattr(meta, "activated", False))
+        except Exception:
+            on = False
+        return "已启用（用 /心 status 看此刻心情）" if on else "未启用（fish_heart 关着）"
+
+    def _growth_summary(self, p) -> str:
+        if p is None:
+            return "还没有人格画像。"
+        t = p.traits
+        lines = [
+            f"第 {p.version} 版（基于 {p.total_atoms} 条记忆）",
+            f"大五：开放 {t.openness} / 尽责 {t.conscientiousness} / 外向 {t.extraversion} "
+            f"/ 宜人 {t.agreeableness} / 神经质 {t.neuroticism}",
+        ]
+        if p.voice.sentence_style:
+            lines.append("说话：" + p.voice.sentence_style)
+        if p.adaptations.values:
+            lines.append("在意：" + "、".join(p.adaptations.values[:3]))
+        if p.narrative:
+            lines.append("叙事：" + p.narrative[:120])
+        return "\n".join(lines)
+
+    async def _detect_conflicts(self, static: str, growth: str) -> str:
+        if not static:
+            return "没读到设定层，先确认人设里有内容。"
+        if not growth or growth == "还没有人格画像。":
+            return "成长层还没长出来，先 /人格 evolve 归纳一次。"
+        provider = self._provider()
+        if provider is None:
+            return "没接上对话模型，没法判断。"
+        try:
+            resp = await provider.text_chat(
+                prompt=(
+                    "下面是一个 AI 角色的两层人格，判断它们有没有「打架」（性格上互相矛盾）的地方。\n\n"
+                    "【设定层（人设里写的，她「应该」是什么样）】\n" + static[:1500] + "\n\n"
+                    "【成长层（从记忆里长出来的，她「实际」是什么样）】\n" + growth + "\n\n"
+                    "只找真正矛盾的性格点（比如人设说「话多」但成长层外向很低；"
+                    "人设说「爱怼人」但宜人很高）。没明显矛盾就说没明显矛盾。"
+                    "用两三句话说人话，别列 JSON，别复述全文。"
+                ),
+                contexts=[],
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+            return text or "（没想出来）"
+        except Exception as e:
+            logger.debug(f"[hlp] 打架检测失败: {e!r}")
+            return "打架检测没做成。"
+
+
+    @filter.command("评价", alias={"rating"})
+    async def cmd_rating(self, event: AstrMessageEvent, name: str = ""):
+        '''看「我」对某人的两维评价（好感 / 态度）。不带名字就列全部。'''
+        if self.store is None:
+            yield event.plain_result("人格库还没准备好。")
+            return
+        name = str(name or "").strip()
+        if name:
+            r = await self.store.find_rating(name)
+            if not r:
+                yield event.plain_result(f"还没对「{name}」形成评价。")
+                return
+            disp = str(r.get("name") or r.get("person_key") or name)
+            lines = [f"「{disp}」的评价：", f"好感 {int(r['affection'])} / 态度 {int(r['attitude'])}"]
+            note = str(r.get("note") or "").strip()
+            if note:
+                lines.append("备注：" + note)
+            yield event.plain_result("\n".join(lines))
+            return
+        rows = await self.store.all_ratings()
+        if not rows:
+            yield event.plain_result("还没对任何人形成评价。")
+            return
+        lines = ["我对这些人的评价："]
+        for r in rows[:15]:
+            disp = str(r.get("name") or r.get("person_key") or "?")
+            lines.append(f"  {disp}：好感 {int(r['affection'])} / 态度 {int(r['attitude'])}")
         yield event.plain_result("\n".join(lines))
 
 

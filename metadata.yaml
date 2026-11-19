@@ -1,4 +1,4 @@
-﻿name: astrbot_plugin_human_like_personality
+name: astrbot_plugin_human_like_personality
 display_name: Human-like Personality
 short_desc: 让 AI 从记忆里长出人格：13 个心理学理论、三层结构、核心锁定、演化可追溯
 desc: |
@@ -35,7 +35,13 @@ desc: |
 
   命令：/人格 status | why | history | evolve
   数据目录：data/plugin_data/astrbot_plugin_human_like_personality/
-version: 2.2.0
+  v2.3 新增：人格演化后可把「现在的她是谁」同步到 QQ 个性签名（人格外显，默认关，见 sync_signature_on_evolve）。
+  v2.4 新增：人格统一——叙事为主锚，跨层一致性校验（规则 + 可选 LLM 自查），修正记入 events 可追溯。
+  v2.5 新增：对外统一——注入块改为「三层合一」（设定层/成长层/心情层），性格冲突时成长层优先、设定层底线不失效。
+  v2.5.1 新增：/人格 统一 命令——报一遍三层各自是什么，并当场检测有没有打架。
+  v3.0 新增：评价体系——好感 + 态度两维（允许背离），从记忆里的夸/责更新，长时间不联系带漂移；/人格 评价 命令。
+  v3.1 新增：评价更新按「相关性」加权——只对我说的（direct）全量、提到我（mention）半量、关于我（about）三成、无关不动。
+version: 3.1.0
 author: 大肥鱼
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"
