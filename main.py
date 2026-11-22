@@ -45,6 +45,8 @@ class HumanLikePersonality(Star):
         self.memory_db: str | None = None
         self._evolve_lock = asyncio.Lock()
         self._last_check = 0.0
+        # 昵称 → QQ，评价统一键到 QQ，避免同一个人两套评价
+        self._name_qq_map: dict[str, str] = {}
 
     # ---------- 初始化 ----------
 
@@ -234,6 +236,7 @@ class HumanLikePersonality(Star):
             total_atoms=total,
             new_atoms=new_atoms,
             people_text=people_text,
+            bot_name=str(self.conf.get("bot_name") or "").strip(),
         )
         if p is None:
             logger.warning("[hlp] 模型没给出有效人格，保留旧版")
@@ -380,6 +383,118 @@ class HumanLikePersonality(Star):
 
     # ---------- 评价体系（好感 + 态度） ----------
 
+    async def _name_to_qq(self) -> dict[str, str]:
+        """people.db 的「昵称 → QQ」表。评价统一按 QQ 键，避免同名两套。"""
+        pdb = self._find_people_db()
+        if not pdb:
+            return {}
+        out: dict[str, str] = {}
+        try:
+            uri = f"file:{pdb.replace(os.sep, '/')}?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as db:
+                qq_by_pid: dict[str, str] = {}
+                names: dict[str, list[str]] = {}
+                cur = await db.execute("SELECT person_id, kind, value FROM person_tags")
+                for r in await cur.fetchall():
+                    pid, kind, val = str(r[0] or ""), str(r[1] or ""), str(r[2] or "").strip()
+                    if not pid or not val:
+                        continue
+                    if kind == "qq":
+                        qq_by_pid[pid] = val
+                    elif kind == "nickname":
+                        names.setdefault(pid, []).append(val)
+                for pid, nm_list in names.items():
+                    qq = qq_by_pid.get(pid, "")
+                    if not qq:
+                        continue
+                    for nm in nm_list:
+                        out.setdefault(nm, qq)
+        except Exception as e:
+            logger.debug(f"[hlp] 读名字→QQ 映射失败: {e!r}")
+        return out
+
+    async def _person_profile_text(self, qq: str, name: str, limit: int = 20) -> str:
+        """从记忆里翻这个人说过/做过的事，当「价值观样本」。"""
+        if not self.memory_db:
+            return ""
+        try:
+            uri = f"file:{self.memory_db.replace(os.sep, '/')}?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT content FROM atoms WHERE (who_id = ? OR who_name = ?) "
+                    "AND status IN ('active','candidate') "
+                    "ORDER BY importance DESC, create_time DESC LIMIT ?",
+                    (str(qq or ""), str(name or ""), max(5, limit)),
+                )
+                rows = await cur.fetchall()
+            return "\n".join(f"- {r['content']}" for r in rows)
+        except Exception:
+            return ""
+
+    def _bot_values_text(self) -> str:
+        """铃光的价值观 / 底线，拿来跟别人比。"""
+        p = self.current
+        if p is None:
+            return ""
+        parts: list[str] = []
+        try:
+            vals = p.adaptations.values if p.adaptations else []
+            if vals:
+                parts.append("她在意：" + "、".join(vals))
+            if p.core and p.core.boundaries:
+                parts.append("她的底线：" + "；".join(p.core.boundaries[:4]))
+            if p.core and p.core.existence_fear:
+                parts.append("她怕：" + p.core.existence_fear)
+            if p.schema and p.schema.self_schema:
+                parts.append("她认定：" + "；".join(p.schema.self_schema[:2]))
+        except Exception:
+            pass
+        return "\n".join(parts)
+
+    async def _ensure_initial_rating(self, key: str, name: str) -> None:
+        """第一次见一个人：按「他的价值观 vs 铃光的价值观」给一笔初始评价。
+
+        契合度高 → 初始分直接给高（一大段）；契合度低 → 低。只做一次。
+        """
+        if self.store is None or not key:
+            return
+        if await self.store.get_rating(key) is not None:
+            return
+        if not bool(self.conf.get("initial_rating_by_values", True)):
+            return
+        try:
+            profile = await self._person_profile_text(key, name)
+            values = self._bot_values_text()
+            provider = self.context.get_using_provider()
+            if not profile or not values or provider is None:
+                return
+            _name = str(self.conf.get("bot_name") or "她").strip() or "她"
+            prompt = (
+                f"下面是「{_name}」的价值观、底线和在意的东西：\n"
+                f"{values}\n\n"
+                "下面是这个人说过/做过的事（从这些能看出他在意什么、是个什么人）：\n"
+                f"{profile[:1800]}\n\n"
+                f"判断：这个人的价值观和{_name}有多契合？0 到 1 之间。\n"
+                "契合 = 尊重她的独立、看重答应的事、不把她当工具、愿意好好说话。\n"
+                '只输出 JSON：{"align":0.0-1.0,"why":"一句话"}'
+            )
+            resp = await provider.text_chat(prompt=prompt, contexts=[])
+            raw = str(getattr(resp, "completion_text", "") or "")
+            m = re.search(r"\{.*\}", raw, re.S)
+            obj = json.loads(m.group(0)) if m else {}
+            align = max(0.0, min(1.0, float(obj.get("align") or 0.5)))
+            # 契合度映射成初始分：0.5=50，1.0=80（增长一大段），0.0=20
+            aff = round(50 + (align - 0.5) * 60, 1)
+            att = round(50 + (align - 0.5) * 40, 1)
+            await self.store.set_initial_rating(key, name, aff, att)
+            logger.info(
+                f"[hlp] 初始评价 {name or key}：契合 {align:.2f} → {aff}/{att}"
+                + (f"（{obj.get('why')}）" if obj.get("why") else "")
+            )
+        except Exception as e:
+            logger.debug(f"[hlp] 初始评价失败: {e!r}")
+
     async def _update_ratings(self) -> None:
         """扫 hlm 最近的 praise/scold 原子，更新两维评价。增量：按 atom id 只扫新的。"""
         if self.store is None or not self.memory_db:
@@ -388,6 +503,10 @@ class HumanLikePersonality(Star):
             return
         try:
             last = int(await self.store.get_state("last_rating_scan_id", "0") or 0)
+            try:
+                self._name_qq_map = await self._name_to_qq()
+            except Exception:
+                self._name_qq_map = {}
             uri = f"file:{self.memory_db.replace(os.sep, '/')}?mode=ro"
             async with aiosqlite.connect(uri, uri=True) as db:
                 db.row_factory = aiosqlite.Row
@@ -403,11 +522,12 @@ class HumanLikePersonality(Star):
             for r in rows:
                 who_id = str(r["who_id"] or "").strip()
                 who_name = str(r["who_name"] or "").strip()
-                # 优先 QQ 号（干净稳定），否则用干净的名字；脏名字（内容片段）直接跳过
+                # 优先 QQ 号（干净稳定）；没有 QQ 就查 people.db 把名字翻成 QQ，
+                # 否则同一个人会按「名字」和「QQ」各存一套评价。
                 if who_id and who_id.isdigit() and len(who_id) >= 5:
                     key, name = who_id, who_name
                 elif who_name and 1 <= len(who_name) <= 8 and not re.search(r"[「」『』\"'（）()，。？、！\s]", who_name):
-                    key, name = who_name, who_name
+                    key, name = self._name_qq_map.get(who_name) or who_name, who_name
                 else:
                     key = ""
                 if not key:
@@ -426,6 +546,11 @@ class HumanLikePersonality(Star):
                     max_id = max(max_id, int(r["id"]))
                     continue
                 kind = "praise" if str(r["nature"]) == "praise" else "scold"
+                # 第一次见这个人：先按价值观给一笔初始评价，再叠这次互动
+                try:
+                    await self._ensure_initial_rating(key, name)
+                except Exception:
+                    pass
                 try:
                     await self.store.apply_interaction(key, kind, name=name, weight=w)
                 except Exception as e:

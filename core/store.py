@@ -407,6 +407,30 @@ class PersonalityStore:
             await db.commit()
         return {"person_key": key, "name": str(name or "").strip()[:30], "affection": new_a, "attitude": new_t, "attribution": attr}
 
+    async def set_initial_rating(
+        self, person_key: str, name: str, affection: float, attitude: float
+    ) -> None:
+        """第一次见某人：按价值观给一笔初始评价（已存在就不动）。"""
+        key = str(person_key or "").strip()
+        if not key:
+            return
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO person_ratings(person_key, name, affection, attitude, "
+                "updated_at, affection_anchor, attitude_anchor) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    str(name or "").strip()[:30],
+                    float(affection),
+                    float(attitude),
+                    now,
+                    float(affection),
+                    float(attitude),
+                ),
+            )
+            await db.commit()
+
     async def drift_ratings(self, drift_days: float = 30.0) -> int:
         """长时间不联系 → 两维各自向中回归（高向下、低向上，各一步）。返回漂了几个人。"""
         now = time.time()

@@ -76,5 +76,17 @@
     "hint": "新旧叙事相似度低于这个值就拒绝落盘，保持旧版。默认 0.35。调低=更宽松。",
     "type": "float",
     "default": 0.35
+  },
+  "initial_rating_by_values": {
+    "description": "按价值观给初始评价",
+    "hint": "第一次见一个人时，比较他的价值观和铃光的人格：契合度高初始分就高，只做一次",
+    "type": "bool",
+    "default": true
+  },
+  "bot_name": {
+    "description": "机器人名字",
+    "hint": "人格归纳、初始评价里用到的名字；留空用「她」",
+    "type": "string",
+    "default": ""
   }
 }

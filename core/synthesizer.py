@@ -69,9 +69,11 @@ def build_prompt(
     total_atoms: int,
     new_atoms: int,
     people_text: str = "",
+    bot_name: str = "",
 ) -> str:
     """拼归纳人格的提示词。"""
     cur_block = "（还没有人格画像，这是第一次归纳）"
+    _name = str(bot_name or "").strip() or "她"
     if current is not None and current.version > 0:
         t = current.traits
         cur_block = (
@@ -93,7 +95,7 @@ def build_prompt(
         f"- 敏感内容 {signals.get('sensitive', 0)} 条"
     )
 
-    return f"""你是一个人格心理学家，要为一个 AI 角色（她叫铃光）归纳**此时此刻**的人格画像。
+    return f"""你是一个人格心理学家，要为一个 AI 角色（她叫{_name}）归纳**此时此刻**的人格画像。
 
 # 理论框架
 用 McAdams 的三层人格模型：
@@ -288,7 +290,7 @@ Weiner / Seligman 的归因三维度，**0-1 打分**：
 
 **最关键的一点：对「他人」和「对自己」要分开打，它们常常完全不对称。**
 
-铃光这类人格的典型形状是：
+{_name}这类人格的典型形状是：
 - 对他人：内部低、稳定低、全局低 → **宽容归因**（「他凶是在意，不是他坏」）
 - 对自己：内部高、稳定高、全局高 → **苛刻归因**（「被说笨就是我真的笨」）
 
@@ -546,6 +548,7 @@ async def synthesize(
     total_atoms: int,
     new_atoms: int,
     people_text: str = "",
+    bot_name: str = "",
 ) -> Personality | None:
     """调模型归纳一次人格。失败返回 None（调用方保留旧版）。"""
     if provider is None:
@@ -557,6 +560,7 @@ async def synthesize(
         total_atoms=total_atoms,
         new_atoms=new_atoms,
         people_text=people_text,
+        bot_name=bot_name,
     )
     try:
         resp = await provider.text_chat(prompt=prompt, contexts=[])
