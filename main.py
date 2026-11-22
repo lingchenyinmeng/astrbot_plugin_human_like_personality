@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import time
 from typing import Any
@@ -29,6 +30,12 @@ from .core.injector import build_block, build_self_report
 from .core.model import Personality, Voice
 from .core.store import PersonalityStore
 from .core.synthesizer import build_prompt, apply_response, synthesize
+from .core import adapt as adapt_mod
+from .core import decision as decision_mod
+from .core import events as events_mod
+from .core import mood as mood_mod
+from .core import scripts as scripts_mod
+from .core import style as style_mod
 
 PLUGIN_NAME = "astrbot_plugin_human_like_personality"
 MEMORY_PLUGIN = "astrbot_plugin_human_like_memory"
@@ -47,6 +54,13 @@ class HumanLikePersonality(Star):
         self._last_check = 0.0
         # 昵称 → QQ，评价统一键到 QQ，避免同一个人两套评价
         self._name_qq_map: dict[str, str] = {}
+        # 发言主动权：每个会话的连发计数与上次她回话的时间
+        self._streak: dict[str, dict] = {}
+        # 当前情绪缓存（2 分钟内复用，避免每条消息都查库）
+        self._mood_cache: dict | None = None
+        self._mood_cache_ts = 0.0
+        # 群聊主动开口的冷却（每个群上次她插话的时间）
+        self._group_last_speak: dict[str, float] = {}
 
     # ---------- 初始化 ----------
 
@@ -133,6 +147,103 @@ class HumanLikePersonality(Star):
 
     # ---------- 注入 ----------
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    async def _track_message(self, event: AstrMessageEvent) -> None:
+        """数「对方连着发了几条」——主动权要用。"""
+        try:
+            if not self.conf.get("enabled", True):
+                return
+            if not bool(self.conf.get("initiative_enabled", True)):
+                return
+            sid = event.unified_msg_origin or event.session_id or ""
+            if not sid:
+                return
+            now = time.time()
+            st = self._streak.setdefault(sid, {"count": 0, "last_ts": 0.0, "replied_at": 0.0})
+            # 超过 3 分钟没动静，重新计数
+            if now - float(st.get("last_ts") or 0) > 180:
+                st["count"] = 0
+            st["count"] = int(st.get("count") or 0) + 1
+            st["last_ts"] = now
+            event.set_extra("hlp_streak", st["count"])
+        except Exception as e:
+            logger.debug(f"[hlp] 连发计数失败: {e!r}")
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=9)
+    async def _group_initiative(self, event: AstrMessageEvent):
+        """群里没点她，也可能自己接一句（有冷却、看心情）。"""
+        try:
+            if not self.conf.get("enabled", True):
+                return
+            if not bool(self.conf.get("group_initiative_enabled", True)):
+                return
+            if event.is_at_or_wake_command:
+                return
+            gid = event.get_group_id() or event.session_id or ""
+            now = time.time()
+            cd = float(self.conf.get("group_initiative_cooldown", 600) or 600)
+            if now - float(self._group_last_speak.get(gid, 0.0)) < cd:
+                return
+            text = event.get_message_str() or ""
+            if len(text) < 6:
+                return
+            mood = await self._current_mood()
+            v = float((mood or {}).get("valence") or 0)
+            if v < -0.2:
+                return
+            score = 0.25 + 0.20 * v
+            if random.random() > score:
+                return
+            self._group_last_speak[gid] = now
+            logger.info(f"[hlp] 群里主动接一句（{gid}，score={score:.2f}）")
+            yield event.request_llm(prompt=text, session_id=event.session_id or gid)
+        except Exception as e:
+            logger.debug(f"[hlp] 群主动开口失败: {e!r}")
+
+    @filter.on_llm_request(priority=40)
+    async def _decide_reply(self, event: AstrMessageEvent, request) -> None:
+        """主动权：她可以选择不回。主人、被点名、被提问、连发过多 → 必须回。"""
+        try:
+            if not self.conf.get("enabled", True):
+                return
+            if not bool(self.conf.get("initiative_enabled", True)):
+                return
+            sid = event.unified_msg_origin or event.session_id or ""
+            st = self._streak.get(sid, {})
+            text = event.get_message_str() or ""
+            mood = await self._current_mood()
+            owner_qq = str(self.conf.get("owner_qq") or "").strip()
+            bot_name = str(self.conf.get("bot_name") or "").strip()
+            sender_id = str(event.get_sender_id() or "")
+            is_owner = bool(owner_qq) and sender_id == owner_qq
+            is_question = ("?" in text or "？" in text or text.rstrip().endswith(("吗", "呢", "么", "嘛")))
+            recently = (time.time() - float(st.get("replied_at") or 0)) < 60
+            d = decision_mod.decide(
+                is_private=event.is_private_chat(),
+                is_owner=is_owner,
+                is_mention=bool(event.is_wake_up()),
+                is_question=is_question,
+                has_name=bool(bot_name) and bot_name in text,
+                text=text,
+                mood=mood,
+                streak=int(st.get("count") or 0),
+                recently_replied=recently,
+                threshold=float(self.conf.get("initiative_threshold", 0.45) or 0.45),
+                force_streak=int(self.conf.get("streak_force_reply", 3) or 3),
+            )
+            event.set_extra("hlp_decision", d)
+            if d.get("action") == "skip":
+                logger.info(f"[hlp] 这次不回（{d.get('why')}，score={d.get('score')}）")
+                event.stop_event()
+                return
+            event.set_extra("hlp_self_express", bool(d.get("self_express")))
+            if sid:
+                st = self._streak.setdefault(sid, {"count": 0, "last_ts": 0.0, "replied_at": 0.0})
+                st["count"] = 0
+                st["replied_at"] = time.time()
+        except Exception as e:
+            logger.debug(f"[hlp] 发言决策失败: {e!r}")
+
     @filter.on_llm_request(priority=60)
     async def _inject_personality(self, event: AstrMessageEvent, request) -> None:
         if not self.conf.get("enabled", True):
@@ -145,12 +256,187 @@ class HumanLikePersonality(Star):
             block = build_block(p, max_chars=int(self.conf.get("inject_max_chars", 1450) or 1450))
             if not block:
                 return
+            extra = await self._dynamic_hints(event, p)
+            if extra:
+                block = block + "\n\n" + extra
             sp = getattr(request, "system_prompt", "") or ""
             if block in sp:
                 return
             setattr(request, "system_prompt", (sp.rstrip() + "\n\n" + block).strip())
         except Exception as e:
             logger.debug(f"[hlp] 注入失败: {e!r}")
+
+    # ---------- 动态层：心情 / 表达风格 / 情境 / 主动权 ----------
+
+    async def _current_mood(self) -> dict | None:
+        """最近 72 小时的热记忆 → 此刻心情。缓存 2 分钟。"""
+        if not bool(self.conf.get("mood_enabled", True)):
+            return None
+        now = time.time()
+        if self._mood_cache is not None and (now - self._mood_cache_ts) < 120:
+            return self._mood_cache
+        try:
+            atoms = await self._recent_emotional_atoms()
+            m = mood_mod.compute_mood(atoms, now=now)
+            self._mood_cache = m
+            self._mood_cache_ts = now
+            return m
+        except Exception as e:
+            logger.debug(f"[hlp] 算心情失败: {e!r}")
+            return None
+
+    async def _recent_emotional_atoms(self, limit: int = 60) -> list[dict]:
+        if not self.memory_db:
+            return []
+        try:
+            uri = f"file:{self.memory_db.replace(os.sep, '/')}?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT id, valence, arousal, importance, said_at, create_time FROM atoms "
+                    "WHERE valence IS NOT NULL AND status IN ('active','candidate') "
+                    "AND COALESCE(said_at, create_time) >= ? "
+                    "ORDER BY COALESCE(said_at, create_time) DESC LIMIT ?",
+                    (time.time() - 72 * 3600, max(10, limit)),
+                )
+                return [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            return []
+
+    async def _style_for(self, event: AstrMessageEvent, p) -> dict | None:
+        """当前对话对象的表达风格。"""
+        try:
+            sender = str(event.get_sender_id() or "")
+            sender_name = str(event.get_sender_name() or "")
+            aff = 50.0
+            att = 50.0
+            if sender and self.store is not None:
+                r = await self.store.find_rating(sender) or await self.store.find_rating(sender_name)
+                if r:
+                    aff = float(r.get("affection") or 50)
+                    att = float(r.get("attitude") or 50)
+            t = p.traits if p else None
+            attachment = ""
+            if p is not None:
+                attachment = str(p.adaptations.attachment_default or "")
+                try:
+                    levels = p.adaptations.attachment_levels or {}
+                    for k in (sender, sender_name):
+                        if k in levels:
+                            attachment = str(levels[k])
+                            break
+                except Exception:
+                    pass
+            mood = await self._current_mood()
+            return style_mod.compute_style(
+                extraversion=t.extraversion if t else 50,
+                neuroticism=t.neuroticism if t else 50,
+                agreeableness=t.agreeableness if t else 50,
+                conscientiousness=t.conscientiousness if t else 50,
+                attachment=attachment,
+                affection=aff,
+                attitude=att,
+                mood=mood,
+            )
+        except Exception as e:
+            logger.debug(f"[hlp] 算表达风格失败: {e!r}")
+            return None
+
+    async def _dynamic_hints(self, event: AstrMessageEvent, p) -> str:
+        """把「此刻心情 / 表达倾向 / 情境反应 / 自我表达 / 学到的说话方式」拼成一段。"""
+        out: list[str] = []
+        try:
+            mood = await self._current_mood()
+            mh = mood_mod.mood_hint(mood)
+            if mh:
+                out.append(mh)
+
+            style = await self._style_for(event, p)
+            if style:
+                sh = style_mod.style_hint(style, to_owner=False)
+                if sh:
+                    out.append(sh)
+
+            # 情境反应
+            if bool(self.conf.get("script_hint_enabled", True)) and p is not None:
+                text = event.get_message_str() or ""
+                situation = scripts_mod.detect_situation(text)
+                if situation:
+                    picked = scripts_mod.pick_scripts(
+                        extraversion=p.traits.extraversion,
+                        neuroticism=p.traits.neuroticism,
+                        agreeableness=p.traits.agreeableness,
+                        conscientiousness=p.traits.conscientiousness,
+                        attachment=str(p.adaptations.attachment_default or ""),
+                        situation=situation,
+                    )
+                    if picked:
+                        out.append("遇到这类事你大概是：" + "".join(picked))
+
+            # 被连发逼到要回一句：说明自己的情绪和需求
+            if event.get_extra("hlp_self_express"):
+                out.append(decision_mod.self_express_hint(mood, bot_name=str(self.conf.get("bot_name") or "")))
+
+            # 言语趋同：跟这个人说话时，稍微像一点
+            if bool(self.conf.get("adapt_enabled", True)) and self.store is not None:
+                sender = str(event.get_sender_id() or "")
+                if sender:
+                    ad = await self.store.get_adapt(sender)
+                    if ad:
+                        try:
+                            vec = json.loads(ad.get("vector") or "{}")
+                        except Exception:
+                            vec = {}
+                        if vec and float(ad.get("intimacy") or 0) >= 0.6:
+                            out.append(
+                                "跟这个人说话，你会不自觉带一点他的习惯："
+                                f"句子大概 {vec.get('avg_len', 0)} 字，"
+                                f"短句占 {int(float(vec.get('short_rate') or 0) * 100)}%，"
+                                f"问句占 {int(float(vec.get('question_rate') or 0) * 100)}%，"
+                                f"爱用语气词 {'是' if float(vec.get('particle_rate') or 0) >= 0.3 else '不多'}。"
+                                "别刻意模仿到丢了自己的口头禅。"
+                            )
+        except Exception as e:
+            logger.debug(f"[hlp] 拼动态提示失败: {e!r}")
+        return "\n".join(x for x in out if x)
+
+    @filter.on_llm_response()
+    async def _rewrite_response(self, event: AstrMessageEvent, response) -> None:
+        """表达风格二次改写：只在风格明显时，把已经写好的回复再改一遍。"""
+        if not self.conf.get("enabled", True):
+            return
+        if not bool(self.conf.get("style_rewrite_enabled", True)):
+            return
+        try:
+            text = str(getattr(response, "completion_text", "") or "").strip()
+            if not text or len(text) > 300:
+                return
+            p = self.current
+            style = await self._style_for(event, p)
+            mood = await self._current_mood()
+            if not style_mod.needs_rewrite(style, mood):
+                return
+            provider = self._provider()
+            if provider is None:
+                return
+            prompt = style_mod.build_rewrite_prompt(
+                text,
+                style=style or {},
+                mood=mood,
+                bot_name=str(self.conf.get("bot_name") or ""),
+                context=event.get_message_str() or "",
+            )
+            resp = await provider.text_chat(prompt=prompt, contexts=[])
+            new = str(getattr(resp, "completion_text", "") or "").strip()
+            if not new:
+                return
+            new = new.strip("\"'“”「」").strip()
+            if len(new) < 2:
+                return
+            response.completion_text = new
+            logger.debug(f"[hlp] 风格改写（{style.get('label')}）：{text[:30]} → {new[:30]}")
+        except Exception as e:
+            logger.debug(f"[hlp] 风格改写失败: {e!r}")
 
     # ---------- 自动演化 ----------
 
@@ -171,6 +457,9 @@ class HumanLikePersonality(Star):
                 await self._maybe_auto_evolve()
                 await self._update_ratings()
                 await self._drift_ratings()
+                await self._update_adapt()
+                await self._scan_events()
+                await self._maybe_promote_shadow()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -242,6 +531,20 @@ class HumanLikePersonality(Star):
             logger.warning("[hlp] 模型没给出有效人格，保留旧版")
             return None
 
+        # ---------- 事件驱动：把最近发生的事并进性格（小步、有上限） ----------
+        try:
+            raw_n = json.loads(await self.store.get_state("pending_nudges", "{}") or "{}")
+            if raw_n:
+                from .core.model import BigFive
+
+                p.traits = BigFive(
+                    **events_mod.apply_nudges(p.traits.to_dict(), raw_n)
+                )
+                await self.store.set_state("pending_nudges", "{}")
+                logger.info(f"[hlp] 事件偏移并入：{raw_n}")
+        except Exception as e:
+            logger.debug(f"[hlp] 并入事件偏移失败: {e!r}")
+
         # ---------- 统一：跨层一致性校验 ----------
         # 叙事是主锚，其余层不能打架。先做零成本的规则校验，再（可选）让模型自查一遍。
         coherence_issues: list[dict] = []
@@ -291,7 +594,17 @@ class HumanLikePersonality(Star):
                     logger.info(f"[hlp] 统一校验修正 {n} 处（第 {version} 版）")
             except Exception as e:
                 logger.debug(f"[hlp] 记录一致性修正失败: {e!r}")
-        self.current = await self.store.latest()
+        # 影子模式：新版本先不生效，注入继续用旧版，等时间到或手动转正
+        if bool(self.conf.get("shadow_mode", False)):
+            prev_v = prev.version if prev else 0
+            await self.store.set_state("shadow_version", str(version))
+            await self.store.set_state("shadow_since", str(time.time()))
+            self.current = prev if prev is not None else await self.store.latest()
+            logger.info(
+                f"[hlp] 影子版 v{version} 已生成，暂不生效（仍用 v{prev_v}）"
+            )
+        else:
+            self.current = await self.store.latest()
         await self.store.set_state("last_total_atoms", str(total))
         await self.store.set_state("last_evolve_at", str(time.time()))
         logger.info(
@@ -645,6 +958,195 @@ class HumanLikePersonality(Star):
             logger.debug(f"[hlp] 读消息历史失败: {e!r}")
         return out
 
+    async def _texts_by_sender(self, sender_id: str, limit: int = 200) -> list[str]:
+        """某个人说过的话（用于言语趋同）。"""
+        hist_db = self._find_history_db()
+        if not hist_db or not sender_id:
+            return []
+        out: list[str] = []
+        try:
+            uri = f"file:{hist_db.replace(os.sep, '/')}?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as db:
+                cur = await db.execute(
+                    "SELECT content FROM platform_message_history WHERE sender_id = ? "
+                    "ORDER BY rowid DESC LIMIT ?",
+                    (str(sender_id), max(20, limit)),
+                )
+                for r in await cur.fetchall():
+                    try:
+                        arr = json.loads(r[0] or "[]")
+                    except Exception:
+                        continue
+                    if not isinstance(arr, list):
+                        continue
+                    for seg in arr:
+                        if isinstance(seg, dict) and seg.get("type") == "text":
+                            t = str((seg.get("data") or {}).get("text") or "").strip()
+                            if t:
+                                out.append(t)
+        except Exception as e:
+            logger.debug(f"[hlp] 读某人消息失败: {e!r}")
+        return out
+
+    async def _update_adapt(self) -> None:
+        """言语趋同：只学主人 + 评价与态度双高的人；AI 不学。"""
+        if self.store is None:
+            return
+        if not bool(self.conf.get("adapt_enabled", True)):
+            return
+        try:
+            last = float(await self.store.get_state("last_adapt_at", "0") or 0)
+            if last and (time.time() - last) < 7 * 86400:
+                return
+            my_texts = await self._load_utterances(300)
+            mine = adapt_mod.style_vector(my_texts)
+            if not mine:
+                return
+            owner_qq = str(self.conf.get("owner_qq") or "").strip()
+            ai_qqs = {x.strip() for x in str(self.conf.get("ai_qqs") or "").split(",") if x.strip()}
+            ai_names = {x.strip() for x in str(self.conf.get("ai_names") or "").split(",") if x.strip()}
+            ratings = await self.store.all_ratings()
+            n = 0
+            for r in ratings:
+                key = str(r.get("person_key") or "")
+                name = str(r.get("name") or "")
+                if not key:
+                    continue
+                if adapt_mod.is_ai(key, name, ai_qqs, ai_names):
+                    continue
+                aff = float(r.get("affection") or 50)
+                att = float(r.get("attitude") or 50)
+                is_owner = bool(owner_qq) and key == owner_qq
+                if not is_owner and not (aff >= 65 and att >= 60):
+                    continue
+                theirs = adapt_mod.style_vector(await self._texts_by_sender(key, 200))
+                if not theirs:
+                    continue
+                intimacy = adapt_mod.intimacy_of(aff, att)
+                existing = await self.store.get_adapt(key)
+                base = mine
+                if existing:
+                    try:
+                        base = json.loads(existing.get("vector") or "{}") or mine
+                    except Exception:
+                        base = mine
+                new = adapt_mod.converge(base, theirs, intimacy=intimacy)
+                await self.store.save_adapt(key, name, new, intimacy)
+                n += 1
+            await self.store.set_state("last_adapt_at", str(time.time()))
+            if n:
+                logger.info(f"[hlp] 言语趋同更新 {n} 人")
+        except Exception as e:
+            logger.debug(f"[hlp] 言语趋同失败: {e!r}")
+
+    async def _scan_events(self) -> None:
+        """扫新记忆里的事件（吵架/和好/关心/被夸/承诺），累积成性格偏移。"""
+        if not self.memory_db or self.store is None:
+            return
+        if not bool(self.conf.get("event_drive_enabled", True)):
+            return
+        try:
+            last = int(await self.store.get_state("last_event_scan_id", "0") or 0)
+            uri = f"file:{self.memory_db.replace(os.sep, '/')}?mode=ro"
+            # 第一次扫描：只把游标推到当前最大，不把历史事件一次性算进来
+            if last <= 0:
+                async with aiosqlite.connect(uri, uri=True) as db:
+                    cur = await db.execute("SELECT MAX(id) FROM atoms")
+                    row = await cur.fetchone()
+                max_id = int((row or [0])[0] or 0)
+                await self.store.set_state("last_event_scan_id", str(max_id))
+                logger.info(f"[hlp] 事件扫描从当前最大 id {max_id} 开始，不回溯历史")
+                return
+            async with aiosqlite.connect(uri, uri=True) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    "SELECT id, content, nature FROM atoms WHERE id > ? "
+                    "AND status IN ('active','candidate') ORDER BY id ASC LIMIT 500",
+                    (last,),
+                )
+                rows = await cur.fetchall()
+            if not rows:
+                return
+            try:
+                acc = json.loads(await self.store.get_state("pending_nudges", "{}") or "{}")
+            except Exception:
+                acc = {}
+            n = 0
+            for r in rows:
+                kind = events_mod.detect_event(str(r["content"] or ""), str(r["nature"] or ""))
+                if kind:
+                    acc = events_mod.merge_nudges(acc, events_mod.nudges_for(kind))
+                    n += 1
+            if n:
+                await self.store.set_state("pending_nudges", json.dumps(acc, ensure_ascii=False))
+            await self.store.set_state(
+                "last_event_scan_id", str(max(int(r["id"]) for r in rows))
+            )
+            if n:
+                logger.info(f"[hlp] 记下 {n} 个事件，性格偏移待并入：{acc}")
+        except Exception as e:
+            logger.debug(f"[hlp] 事件扫描失败: {e!r}")
+
+    async def _maybe_promote_shadow(self) -> None:
+        """影子模式：够时间就转正。"""
+        if self.store is None:
+            return
+        try:
+            sv = int(await self.store.get_state("shadow_version", "0") or 0)
+            if not sv:
+                return
+            since = float(await self.store.get_state("shadow_since", "0") or 0)
+            hours = float(self.conf.get("shadow_hours", 48) or 48)
+            if since and (time.time() - since) < hours * 3600:
+                return
+            await self._promote_shadow()
+        except Exception as e:
+            logger.debug(f"[hlp] 影子转正检查失败: {e!r}")
+
+    async def _promote_shadow(self) -> int | None:
+        if self.store is None:
+            return None
+        sv = int(await self.store.get_state("shadow_version", "0") or 0)
+        if not sv:
+            return None
+        p = await self.store.get_version(sv)
+        if p is None:
+            return None
+        self.current = p
+        await self.store.set_state("shadow_version", "")
+        await self.store.set_state("shadow_since", "")
+        logger.info(f"[hlp] 影子版 v{sv} 转正")
+        return sv
+
+    async def _restore_version(self, version: int) -> int | None:
+        """回滚：把某一版的内容重新存成最新版（可追溯，不删历史）。"""
+        if self.store is None:
+            return None
+        old = await self.store.get_version(int(version))
+        if old is None:
+            return None
+        new_v = await self.store.save(
+            old,
+            reason=f"回滚到 v{version}",
+            changed_by="rollback",
+        )
+        self.current = await self.store.latest()
+        return new_v
+
+    async def _change_summary(self, limit: int = 8) -> str:
+        """最近的变化摘要（给 /人格 摘要 用）。"""
+        if self.store is None:
+            return "人格库还没准备好。"
+        evs = await self.store.events(limit=limit)
+        if not evs:
+            return "还没有变化记录。"
+        lines = ["最近变的："]
+        for e in evs[:limit]:
+            lines.append(
+                f"v{e['version']} · {e['dimension']}：{str(e['old_value'])[:40]} → {str(e['new_value'])[:40]}"
+            )
+        return "\n".join(lines)
+
     def _find_history_db(self) -> str | None:
         """AstrBot 主库（有 platform_message_history）。"""
         cands = []
@@ -902,6 +1404,32 @@ class HumanLikePersonality(Star):
             )
         yield event.plain_result("\n".join(lines))
 
+
+    @filter.command("摘要", alias={"summary"})
+    async def cmd_summary(self, event: AstrMessageEvent):
+        """最近这几版她变了什么。"""
+        yield event.plain_result(await self._change_summary())
+
+    @filter.command("回滚", alias={"rollback"})
+    async def cmd_rollback(self, event: AstrMessageEvent, version: int = 0):
+        """回滚到某一版（存成新的最新版，历史不丢）。"""
+        if not version:
+            yield event.plain_result("用法：/人格 回滚 版本号（用 /人格 history 看）")
+            return
+        v = await self._restore_version(int(version))
+        if v is None:
+            yield event.plain_result(f"第 {version} 版不存在。")
+            return
+        yield event.plain_result(f"已回滚到 v{version}，现在是 v{v}。")
+
+    @filter.command("转正", alias={"promote"})
+    async def cmd_promote(self, event: AstrMessageEvent):
+        """把影子版转正。"""
+        v = await self._promote_shadow()
+        if v is None:
+            yield event.plain_result("没有待转正的影子版。")
+            return
+        yield event.plain_result(f"影子版 v{v} 已转正。")
 
     @filter.command("统一", alias={"unify", "unified"})
     async def cmd_unify(self, event: AstrMessageEvent):

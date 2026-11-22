@@ -88,5 +88,95 @@
     "hint": "人格归纳、初始评价里用到的名字；留空用「她」",
     "type": "string",
     "default": ""
+  },
+  "initiative_enabled": {
+    "description": "发言主动权",
+    "hint": "让她自己决定回不回：心情差、不想接就不回；主人和被点名必回",
+    "type": "bool",
+    "default": true
+  },
+  "initiative_threshold": {
+    "description": "开口门槛",
+    "hint": "0-1，越高越不爱说话。默认 0.45",
+    "type": "float",
+    "default": 0.45
+  },
+  "streak_force_reply": {
+    "description": "连发几条必须回",
+    "hint": "对方连着发这么多条没被理，必须回一条，说明自己的情绪和需求",
+    "type": "int",
+    "default": 3
+  },
+  "mood_enabled": {
+    "description": "情绪影响语气",
+    "hint": "按最近 72 小时热记忆算此刻心情，只影响说话方式，不改性格",
+    "type": "bool",
+    "default": true
+  },
+  "style_rewrite_enabled": {
+    "description": "表达风格二次改写",
+    "hint": "回复生成后按「直率/隐晦/别扭」再改一遍（多一次模型调用，只在风格明显时触发）",
+    "type": "bool",
+    "default": true
+  },
+  "script_hint_enabled": {
+    "description": "情境反应提示",
+    "hint": "按性格给「犯错/被夸/冲突/被冷落」时的反应倾向",
+    "type": "bool",
+    "default": true
+  },
+  "adapt_enabled": {
+    "description": "言语趋同",
+    "hint": "每周学一次：只学主人和评价态度双高的人，AI 不学",
+    "type": "bool",
+    "default": true
+  },
+  "owner_qq": {
+    "description": "主人 QQ",
+    "hint": "主人的 QQ（必回、言语趋同都靠它）",
+    "type": "string",
+    "default": ""
+  },
+  "ai_qqs": {
+    "description": "AI 的 QQ 名单",
+    "hint": "逗号分隔，避免把 AI 当成要学的对象",
+    "type": "string",
+    "default": ""
+  },
+  "ai_names": {
+    "description": "AI 的名字名单",
+    "hint": "逗号分隔，比如 乘月,astrbot",
+    "type": "string",
+    "default": ""
+  },
+  "event_drive_enabled": {
+    "description": "事件驱动性格",
+    "hint": "吵架/和好/关心/被夸/承诺这类事，会一点点推性格（下次演化时并入，有上限）",
+    "type": "bool",
+    "default": true
+  },
+  "shadow_mode": {
+    "description": "影子模式",
+    "hint": "新人格先生成但不生效，到时间或 /人格 转正 才用",
+    "type": "bool",
+    "default": false
+  },
+  "shadow_hours": {
+    "description": "影子多久转正",
+    "hint": "影子模式下的等待小时数",
+    "type": "int",
+    "default": 48
+  },
+  "group_initiative_enabled": {
+    "description": "群聊主动开口",
+    "hint": "群里没点她也可能接一句（有冷却、看心情）",
+    "type": "bool",
+    "default": true
+  },
+  "group_initiative_cooldown": {
+    "description": "群主动冷却",
+    "hint": "同一个群两次主动接话至少隔多少秒",
+    "type": "int",
+    "default": 600
   }
 }

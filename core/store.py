@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS person_ratings (
     attitude_anchor  REAL DEFAULT 50,
     last_drift_at    REAL DEFAULT 0
 );
+
+-- 言语趋同：她对每个人学到的说话风格向量
+CREATE TABLE IF NOT EXISTS speech_adapt (
+    person_key TEXT PRIMARY KEY,
+    name       TEXT DEFAULT '',
+    vector     TEXT DEFAULT '{}',
+    intimacy   REAL DEFAULT 0,
+    updated_at REAL DEFAULT 0
+);
+
+-- 情绪历史（只影响表现层，不改大五）
+CREATE TABLE IF NOT EXISTS mood_history (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      REAL NOT NULL,
+    valence REAL DEFAULT 0,
+    arousal REAL DEFAULT 0,
+    label   TEXT DEFAULT ''
+);
 """
 
 
@@ -430,6 +448,60 @@ class PersonalityStore:
                 ),
             )
             await db.commit()
+
+    async def save_adapt(
+        self, person_key: str, name: str, vector: dict, intimacy: float
+    ) -> None:
+        """存她对某人的说话风格向量（言语趋同的结果）。"""
+        key = str(person_key or "").strip()
+        if not key:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO speech_adapt(person_key, name, vector, intimacy, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(person_key) DO UPDATE SET "
+                "name = CASE WHEN excluded.name != '' THEN excluded.name ELSE speech_adapt.name END, "
+                "vector = excluded.vector, intimacy = excluded.intimacy, updated_at = excluded.updated_at",
+                (key, str(name or "").strip()[:30], json.dumps(vector, ensure_ascii=False),
+                 float(intimacy), time.time()),
+            )
+            await db.commit()
+
+    async def get_adapt(self, person_key: str) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM speech_adapt WHERE person_key = ?", (str(person_key),)
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def all_adapt(self) -> list[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM speech_adapt ORDER BY intimacy DESC")
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def record_mood(self, valence: float, arousal: float, label: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO mood_history(at, valence, arousal, label) VALUES (?, ?, ?, ?)",
+                (time.time(), float(valence), float(arousal), str(label or "")),
+            )
+            # 只留最近 500 条
+            await db.execute(
+                "DELETE FROM mood_history WHERE id NOT IN "
+                "(SELECT id FROM mood_history ORDER BY id DESC LIMIT 500)"
+            )
+            await db.commit()
+
+    async def recent_mood(self, limit: int = 20) -> list[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM mood_history ORDER BY id DESC LIMIT ?", (max(1, limit),)
+            )
+            return [dict(r) for r in await cur.fetchall()]
 
     async def drift_ratings(self, drift_days: float = 30.0) -> int:
         """长时间不联系 → 两维各自向中回归（高向下、低向上，各一步）。返回漂了几个人。"""
