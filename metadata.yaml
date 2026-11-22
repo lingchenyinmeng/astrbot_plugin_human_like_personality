@@ -47,6 +47,6 @@ desc: |
   v3.1.4 初始评价：第一次见一个人时，比较他的价值观与铃光的人格，契合度高则初始分直接给高（最高 80）。
   v3.1.5 去硬编码：人格名字走配置 bot_name（归纳提示词、初始评价都用它），不再写死。
 version: 3.1.5
-author: 大肥鱼
+author: 噩壤
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"

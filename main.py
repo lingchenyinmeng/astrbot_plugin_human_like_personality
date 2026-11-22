@@ -34,7 +34,7 @@ PLUGIN_NAME = "astrbot_plugin_human_like_personality"
 MEMORY_PLUGIN = "astrbot_plugin_human_like_memory"
 
 
-@register(PLUGIN_NAME, "大肥鱼", "人格不是写死的提示词，是从记忆里长出来的", "1.0.0")
+@register(PLUGIN_NAME, "噩壤", "人格不是写死的提示词，是从记忆里长出来的", "1.0.0")
 class HumanLikePersonality(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
