@@ -50,7 +50,7 @@ desc: |
   v3.3.2 修：群主动开口先分清「是不是对她说的」——@别人/引用回复/点名别人不插嘴，接之前先让模型判断「接/不接」，prompt 带说话人且明确「这句不是对你说的」。
   v3.3.1 修：事件扫描首次运行不再回溯历史（只从当前最大 id 开始），避免性格被历史事件一次性顶格。
   v3.3.0 事件与时间：事件驱动性格（吵架/和好/关心/被夸/承诺）、影子模式、变化摘要、版本回滚、群聊主动开口（有冷却、看心情）。
-version: 3.3.2
+version: 3.3.3
 author: 噩壤
 repo: https://github.com/lingchenyinmeng/astrbot_plugin_human_like_personality
 astrbot_version: ">=4.18"

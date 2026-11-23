@@ -243,6 +243,7 @@ class HumanLikePersonality(Star):
                 return
 
             self._group_last_speak[gid] = now
+            event.set_extra("hlp_group_initiative", True)
             logger.info(f"[hlp] 群里主动接一句（{gid}，{speaker}）")
             yield event.request_llm(
                 prompt=(
@@ -263,6 +264,27 @@ class HumanLikePersonality(Star):
                 return
             if not bool(self.conf.get("initiative_enabled", True)):
                 return
+            # 群里：没被叫到就不回（除非是她自己判断该接的那条）
+            if not event.is_private_chat():
+                _txt = event.get_message_str() or ""
+                _bot = str(self.conf.get("bot_name") or "").strip()
+                _alias = [
+                    x.strip()
+                    for x in str(self.conf.get("bot_aliases") or "").split(",")
+                    if x.strip()
+                ]
+                _names = ([_bot] if _bot else []) + _alias
+                _called = bool(event.is_at_or_wake_command) or any(
+                    n and n in _txt for n in _names
+                )
+                if (
+                    not _called
+                    and not event.get_extra("hlp_group_initiative")
+                    and bool(self.conf.get("group_reply_requires_mention", True))
+                ):
+                    logger.info("[hlp] 群消息没点她，不回")
+                    event.stop_event()
+                    return
             sid = event.unified_msg_origin or event.session_id or ""
             st = self._streak.get(sid, {})
             text = event.get_message_str() or ""

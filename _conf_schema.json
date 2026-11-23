@@ -190,5 +190,11 @@
     "hint": "逗号分隔，比如 小光,光；群里叫这些名字也算叫她",
     "type": "string",
     "default": ""
+  },
+  "group_reply_requires_mention": {
+    "description": "群里没点她不回",
+    "hint": "群里没 @她、没叫她名字、也没主动判断要接的消息，一律不回（防把别人的话当成对她说的）",
+    "type": "bool",
+    "default": true
   }
 }
