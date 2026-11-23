@@ -169,13 +169,30 @@ class HumanLikePersonality(Star):
         except Exception as e:
             logger.debug(f"[hlp] 连发计数失败: {e!r}")
 
+    def _addressed_to_other(self, event: AstrMessageEvent) -> bool:
+        """这句话是不是冲着群里别人说的：@了别人 / 引用回复 / 点名别人。"""
+        try:
+            bot_qq = str(self.conf.get("bot_qq") or "").strip()
+            for comp in event.get_messages() or []:
+                t = str(getattr(comp, "type", "") or "")
+                data = getattr(comp, "data", {}) or {}
+                if t == "at":
+                    qq = str(data.get("qq") or "").strip()
+                    if qq and bot_qq and qq != bot_qq:
+                        return True
+                if t == "reply":
+                    return True
+        except Exception:
+            pass
+        return False
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=9)
     async def _group_initiative(self, event: AstrMessageEvent):
-        """群里没点她，也可能自己接一句（有冷却、看心情）。"""
+        """群里没点她，也可能自己接一句——但先分清「是不是对她说的」。"""
         try:
             if not self.conf.get("enabled", True):
                 return
-            if not bool(self.conf.get("group_initiative_enabled", True)):
+            if not bool(self.conf.get("group_initiative_enabled", False)):
                 return
             if event.is_at_or_wake_command:
                 return
@@ -187,16 +204,54 @@ class HumanLikePersonality(Star):
             text = event.get_message_str() or ""
             if len(text) < 6:
                 return
+
+            bot_name = str(self.conf.get("bot_name") or "").strip()
+            aliases = [x.strip() for x in str(self.conf.get("bot_aliases") or "").split(",") if x.strip()]
+            names = [bot_name] + aliases if bot_name else aliases
+            called_me = any(n and n in text for n in names)
+
+            # 冲别人说的：@别人 / 引用回复 / 点名别人 —— 除非叫了她名字，否则不插嘴
+            if not called_me and self._addressed_to_other(event):
+                return
+
             mood = await self._current_mood()
             v = float((mood or {}).get("valence") or 0)
             if v < -0.2:
                 return
-            score = 0.25 + 0.20 * v
-            if random.random() > score:
+            chance = float(self.conf.get("group_initiative_chance", 0.15) or 0.15)
+            score = chance + 0.10 * v
+            if random.random() > max(0.02, score):
                 return
+
+            provider = self._provider()
+            if provider is None:
+                return
+            speaker = str(event.get_sender_name() or "").strip() or "群友"
+
+            # 先让模型判断「该不该接」——它知道这句不是对她说的
+            decide_prompt = (
+                "你在一个群聊里，是群成员之一，不是客服。\n"
+                f"群友「{speaker}」刚说：「{text}」\n"
+                "这句话不是对你说的，你只是在旁边看着。你要不要自然接一句？\n"
+                "只有你确实有话想说、或这句其实跟你有关、或你能帮上忙时才接；"
+                "没话说就别硬接。\n"
+                "只回答两个字：接 或 不接。"
+            )
+            resp = await provider.text_chat(prompt=decide_prompt, contexts=[])
+            ans = str(getattr(resp, "completion_text", "") or "").strip()
+            if not ans or ans.startswith("不") or "不接" in ans:
+                return
+
             self._group_last_speak[gid] = now
-            logger.info(f"[hlp] 群里主动接一句（{gid}，score={score:.2f}）")
-            yield event.request_llm(prompt=text, session_id=event.session_id or gid)
+            logger.info(f"[hlp] 群里主动接一句（{gid}，{speaker}）")
+            yield event.request_llm(
+                prompt=(
+                    f"（群聊里，「{speaker}」刚说：「{text}」。"
+                    "这句本来不是对你说的，你在群里可以自然接一句，也可以只回一个表情；"
+                    "就当平常聊天，别自我介绍、别总结、别说教。）"
+                ),
+                session_id=event.session_id or gid,
+            )
         except Exception as e:
             logger.debug(f"[hlp] 群主动开口失败: {e!r}")
 

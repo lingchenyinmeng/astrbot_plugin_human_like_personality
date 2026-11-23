@@ -178,5 +178,17 @@
     "hint": "同一个群两次主动接话至少隔多少秒",
     "type": "int",
     "default": 600
+  },
+  "group_initiative_chance": {
+    "description": "群主动概率",
+    "hint": "0-1，每次满足条件时「先问模型接不接」的概率；默认 0.15 很克制",
+    "type": "float",
+    "default": 0.15
+  },
+  "bot_aliases": {
+    "description": "机器人别名",
+    "hint": "逗号分隔，比如 小光,光；群里叫这些名字也算叫她",
+    "type": "string",
+    "default": ""
   }
 }
